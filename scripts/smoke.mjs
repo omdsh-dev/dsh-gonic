@@ -14,9 +14,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
 	GonicStore,
+	PlayCommandStore,
 	browse,
 	gonicBrowseTool,
 	gonicCreatePlaylistTool,
+	gonicPlayTool,
 	gonicPlaylistTool,
 	gonicPlaylistsTool,
 	gonicSearchTool,
@@ -69,6 +71,12 @@ const badPath = await gonicBrowseTool(holeStore).execute({ path: "bogus:1" });
 check("browse rejects unknown path", badPath.ok === false && /未知浏览路径/.test(badPath.message), badPath.message);
 const unreachable = await gonicSearchTool(holeStore).execute({ query: "x" });
 check("unreachable server translated", unreachable.ok === false && /网络请求失败|HTTP/.test(unreachable.message), unreachable.message);
+const playNone = await gonicPlayTool(holeStore, new PlayCommandStore()).execute({});
+check("play requires a source", playNone.ok === false && /playlistId/.test(playNone.message), playNone.message);
+const playTwo = await gonicPlayTool(holeStore, new PlayCommandStore()).execute({ playlistId: "x", query: "y" });
+check("play rejects multiple sources", playTwo.ok === false && /只能提供一个/.test(playTwo.message), playTwo.message);
+const playUnconfigured = await gonicPlayTool(tempStore(), new PlayCommandStore()).execute({ query: "x" });
+check("play unconfigured", playUnconfigured.ok === false && /尚未配置/.test(playUnconfigured.message), playUnconfigured.message);
 
 // 5. Live read-only checks against the real config, when present.
 const realStore = new GonicStore();
@@ -85,6 +93,18 @@ if (realCfg.baseUrl && realCfg.username && realCfg.password) {
 	check("starred live", starred.ok === true, starred.message);
 	const recent = await gonicBrowseTool(realStore).execute({ path: "recent" });
 	check("browse recent live", recent.ok === true && recent.nodes.length > 0, recent.message);
+
+	// gonic_play publishes into the slot handed to it — here a smoke-local
+	// one, NOT the running Harness's — so the user's player stays silent.
+	const slot = new PlayCommandStore();
+	if (lists.ok && Array.isArray(lists.playlists) && lists.playlists.length) {
+		const played = await gonicPlayTool(realStore, slot).execute({ playlistId: lists.playlists[0].id });
+		check("play playlist resolves", played.ok === true && played.count > 0 && slot.get().tracks.length === played.count && slot.get().ts > 0, played.message);
+	} else {
+		console.log("SKIP play-playlist check — 服务器上没有歌单");
+	}
+	const playQuery = await gonicPlayTool(realStore, slot).execute({ query: "a", limit: 1 });
+	check("play query resolves", playQuery.ok === true && playQuery.count <= 1 && slot.get().tracks.length === playQuery.count, playQuery.message);
 
 	// Wrong password → the Subsonic error envelope must surface as a
 	// translated failure, not a crash or a silent ok.
