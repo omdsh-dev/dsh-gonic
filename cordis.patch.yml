@@ -1,0 +1,7 @@
+# dsh-gonic bundle patch: inserts the plugin row into the profile roster.
+- insert:
+    - id: gonic
+      name: dsh-gonic
+      config:
+        announceToAgent: true   # 在系统提示中公告插件（工具 + 能力说明）
+        enabled: true           # 插件总开关

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Gonic 播放器",
+    "description": "在 Web GUI 内播放你的 Gonic/Subsonic 曲库：浏览、搜索、收藏、歌单、队列与播放；并为 agent 提供搜歌、浏览曲库、创建歌单等工具。"
+  }
+}
