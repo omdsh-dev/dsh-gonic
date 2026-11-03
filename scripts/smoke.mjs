@@ -1,0 +1,101 @@
+/**
+ * Smoke test for dsh-gonic — strictly read-only against any live server:
+ * search/browse/starred/playlists are queries, and the one write tool
+ * (gonic_create_playlist) is only exercised on validation paths that reject
+ * before any network traffic. Never writes to ~/.dsh/dsh-gonic.json either;
+ * stores under test point at temp files.
+ *
+ * Usage: node scripts/smoke.mjs
+ *   With a configured ~/.dsh/dsh-gonic.json the live read-only checks run
+ *   against that server; otherwise they are skipped.
+ */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+	GonicStore,
+	browse,
+	gonicBrowseTool,
+	gonicCreatePlaylistTool,
+	gonicPlaylistTool,
+	gonicPlaylistsTool,
+	gonicSearchTool,
+	gonicStarredTool,
+	gonicStatusTool,
+	normalizeBaseUrl
+} from "../lib/index.js";
+
+let failures = 0;
+const check = (label, cond, extra) => {
+	console.log((cond ? "PASS" : "FAIL") + "  " + label + (extra !== undefined ? "  →  " + extra : ""));
+	if (!cond) failures++;
+};
+const tmpDirs = [];
+function tempStore() {
+	const dir = mkdtempSync(path.join(tmpdir(), "dsh-gonic-smoke-"));
+	tmpDirs.push(dir);
+	return new GonicStore(path.join(dir, "config.json"));
+}
+
+// 1. URL normalization
+check("normalize bare host", normalizeBaseUrl("gonic.example.com/") === "http://gonic.example.com", normalizeBaseUrl("gonic.example.com/"));
+check("normalize keeps https + path", normalizeBaseUrl("https://example.com/gonic/") === "https://example.com/gonic", normalizeBaseUrl("https://example.com/gonic/"));
+check("normalize rejects junk", (() => { try { normalizeBaseUrl("http://"); return false; } catch { return true; } })());
+check("normalize rejects non-http scheme", (() => { try { normalizeBaseUrl("ftp://example.com"); return false; } catch { return true; } })());
+
+// 2. browse() root menu is static — no network, works with an empty config
+const root = await browse({}, "");
+check("browse root menu", Array.isArray(root.nodes) && root.nodes.length === 5 && root.tracks.length === 0, root.nodes.map((n) => n.path).join(","));
+
+// 3. Unconfigured paths (isolated temp store, missing file → empty config)
+const emptyStore = tempStore();
+const statusEmpty = await gonicStatusTool(emptyStore).execute({});
+check("status unconfigured", statusEmpty.ok === false && statusEmpty.configured === false, statusEmpty.message);
+const searchEmpty = await gonicSearchTool(emptyStore).execute({ query: "x" });
+check("search unconfigured", searchEmpty.ok === false && /尚未配置/.test(searchEmpty.message), searchEmpty.message);
+
+// 4. Validation short-circuits before any network I/O — the store is
+// "configured" but points at a black hole; blank input must fail fast with
+// the validation message, not a network error.
+const holeStore = tempStore();
+await holeStore.save({ baseUrl: "http://127.0.0.1:9", username: "smoke", password: "smoke" });
+const noQuery = await gonicSearchTool(holeStore).execute({ query: "   " });
+check("search rejects blank query", noQuery.ok === false && /不能为空/.test(noQuery.message), noQuery.message);
+const noId = await gonicPlaylistTool(holeStore).execute({ id: "" });
+check("playlist rejects blank id", noId.ok === false && /不能为空/.test(noId.message), noId.message);
+const noName = await gonicCreatePlaylistTool(holeStore).execute({ name: "  " });
+check("create_playlist rejects blank name", noName.ok === false && /不能为空/.test(noName.message), noName.message);
+const badPath = await gonicBrowseTool(holeStore).execute({ path: "bogus:1" });
+check("browse rejects unknown path", badPath.ok === false && /未知浏览路径/.test(badPath.message), badPath.message);
+const unreachable = await gonicSearchTool(holeStore).execute({ query: "x" });
+check("unreachable server translated", unreachable.ok === false && /网络请求失败|HTTP/.test(unreachable.message), unreachable.message);
+
+// 5. Live read-only checks against the real config, when present.
+const realStore = new GonicStore();
+const realCfg = await realStore.get();
+if (realCfg.baseUrl && realCfg.username && realCfg.password) {
+	console.log("— live checks against " + realCfg.baseUrl + " (user " + realCfg.username + ") —");
+	const status = await gonicStatusTool(realStore).execute({});
+	check("status live", status.ok === true, status.message);
+	const search = await gonicSearchTool(realStore).execute({ query: "a", limit: 1 });
+	check("search live", search.ok === true && search.count <= 1, search.message);
+	const lists = await gonicPlaylistsTool(realStore).execute({});
+	check("playlists live", lists.ok === true && Array.isArray(lists.playlists), lists.message);
+	const starred = await gonicStarredTool(realStore).execute({});
+	check("starred live", starred.ok === true, starred.message);
+	const recent = await gonicBrowseTool(realStore).execute({ path: "recent" });
+	check("browse recent live", recent.ok === true && recent.nodes.length > 0, recent.message);
+
+	// Wrong password → the Subsonic error envelope must surface as a
+	// translated failure, not a crash or a silent ok.
+	const deniedStore = tempStore();
+	await deniedStore.save({ baseUrl: realCfg.baseUrl, username: realCfg.username, password: "wrong-password-for-smoke" });
+	const denied = await gonicSearchTool(deniedStore).execute({ query: "x" });
+	check("wrong password translated", denied.ok === false && /服务器拒绝|HTTP/.test(denied.message), denied.message);
+} else {
+	console.log("SKIP live checks — ~/.dsh/dsh-gonic.json 未配置");
+}
+
+for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+console.log(failures === 0 ? "\nALL SMOKE TESTS PASSED" : "\n" + failures + " FAILURES");
+process.exit(failures === 0 ? 0 : 1);
