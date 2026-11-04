@@ -27,6 +27,7 @@ jobs:
         run: npm ci --legacy-peer-deps && npm run build
       - name: Pack the artifact
         run: |
+          mkdir -p dist
           npm pack --pack-destination dist
           mv dist/*.tgz dist/pkg.tgz
       - name: Publish to the version release
