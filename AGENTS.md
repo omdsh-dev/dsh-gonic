@@ -155,12 +155,6 @@ server into the workflow.
 
 ## 9. Current exceptions and open questions
 
-- **dsh-pi-models** is pure-JS today. The README and CI history frame this as
-  a design philosophy (no build step, no lockfile); that rationale has been
-  challenged and does not hold up (dev tooling never ships in the tarball,
-  the reload mechanism is language-agnostic, and the no-lockfile stance
-  produced three CI-fix commits). Conversion to the §2 stack is a standing
-  option — decide on current cost/benefit, not on the historical framing.
 - **dsh-web-skin** is client-only (no tools/routes/store); its palettes are
   data modules and stay `.mjs`, and `tools/*.mjs` are dev scripts — converting
   data files to TS would add a build hop with no type surface to check.
