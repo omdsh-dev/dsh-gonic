@@ -20,6 +20,15 @@ Host: Node `^22.19.0 || >=24.0.0`, DSH `>=0.2.1-rc.2 <0.3.0`.
 
 ## Install
 
+Published releases carry the compiled `lib/` output, so the tarball needs no
+build:
+
+```sh
+dsh plugin --profile web add "https://github.com/omdsh-dev/dsh-gonic/releases/latest/download/pkg.tgz"
+```
+
+For local development, link the checkout instead:
+
 ```sh
 npm install --legacy-peer-deps && npm run build   # first time only: src/*.ts → lib/
 dsh plugin --profile web add link:/path/to/dsh-gonic

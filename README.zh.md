@@ -20,6 +20,15 @@
 
 ## 安装
 
+已发布的版本自带编译好的 `lib/` 产物，直接装 tarball 即可：
+
+```sh
+# 从最新 release 安装（零运行时依赖，无需构建）
+dsh plugin --profile web add "https://github.com/omdsh-dev/dsh-gonic/releases/latest/download/pkg.tgz"
+```
+
+本地开发用 link 方式：
+
 ```sh
 npm install --legacy-peer-deps && npm run build   # 仅首次：src/*.ts → lib/
 dsh plugin --profile web add link:/path/to/dsh-gonic
