@@ -11,15 +11,126 @@
  * settings section and every per-session composer dock.
  *
  * Hand-written ModuleLoader module: plain React (createElement), component
- * styles ride a <style> element so unmounting removes them. No build step.
+ * styles ride a <style> element so unmounting removes them. Source is
+ * TypeScript (src/); lib/ is tsc output.
  */
+
+/** The ModuleLoader's CommonJS-style require; only react is used here. */
+type ModuleRequire = (id: "react") => typeof import("react");
+
+/** One ModuleLoader module definition (id + CommonJS-style factory). */
+interface ModuleLoaderDefinition {
+	id: string;
+	factory: (require: ModuleRequire) => unknown;
+}
+
+interface Window {
+	__ModuleLoader__: {
+		load(definition: ModuleLoaderDefinition): void;
+	};
+}
+
 window.__ModuleLoader__.load({
 	id: "dsh-gonic",
 	factory: (require) => {
-		var module = { exports: {} };
+		var module = { exports: {} as Record<string, unknown> };
 		var exports = module.exports;
 		var React = require("react");
 		var h = React.createElement;
+
+		/** One client-side track row (host Track plus the cover art id). */
+		type Track = {
+			id: string;
+			title: string;
+			artist: string;
+			album: string;
+			duration: number;
+			coverId: string;
+		};
+		/** One browse node (folder-like catalogue entry). */
+		type BrowseNode = {
+			path: string;
+			label: string;
+			detail?: string;
+		};
+		/** One browse() result: folder nodes plus (at leaf levels) tracks. */
+		type BrowseResult = {
+			nodes: BrowseNode[];
+			tracks: Track[];
+		};
+		/** Parsed subsonic-response payload: raw JSON whose fields are re-validated at each use site. */
+		type LoosePayload = Record<string, any>;
+		/** Credentials view held in memory (loaded from the Host config route). */
+		interface ClientConfig {
+			baseUrl: string;
+			username: string;
+			password: string;
+			loaded: boolean;
+		}
+		/** Legacy v1 localStorage config record (migrated to the Host once). */
+		interface StoredConfig {
+			baseUrl: string;
+			username: string;
+			password: string;
+		}
+		/** Persisted play-queue state (localStorage). */
+		interface QueueState {
+			tracks: Track[];
+			cursor: number;
+			repeat: string;
+			shuffle: boolean;
+		}
+		/** Persisted playback snapshot for resume-after-reload. */
+		interface PlaybackSnapshot {
+			id: string | null;
+			position: number;
+			volume: number;
+		}
+		/** Live player state store shape. */
+		interface PlayerState {
+			status: "idle" | "loading" | "playing" | "paused" | "error";
+			position: number;
+			duration: number;
+			volume: number;
+			error: string;
+		}
+		/** Minimal observable-store surface returned by createStore. */
+		interface Store<T> {
+			get(): T;
+			update(patch: Partial<T> | ((state: T) => Partial<T>)): void;
+			replace(next: T): void;
+			subscribe(fn: () => void): () => void;
+		}
+		/** One remote-load result plus its reload trigger (the useRemoteLoad pair). */
+		type RemoteLoad<T> = [{ loading: boolean; error: string; data: T | null }, () => void];
+		/** Playlist header row in the playlists tab. */
+		interface PlaylistRow {
+			id: string;
+			name: string;
+			count: number;
+		}
+		/** Selected playlist reference ({id,name}) or null for the list view. */
+		interface PlaylistRef {
+			id: string;
+			name: string;
+		}
+		/** Layout service surface used here (panel selection). */
+		interface LayoutRef {
+			selectPanel(id: string): void;
+		}
+		/** Minimal client context surface used by this module. */
+		interface ClientContext {
+			slots: {
+				inject(name: string, callback: () => unknown): unknown;
+				register(definition: Record<string, unknown>, component: unknown): unknown;
+			};
+			locale: {
+				register(plugin: string, locale: string, dict: Record<string, string>): unknown;
+				bind(plugin: string): (key: string) => string;
+			};
+			layout?: LayoutRef;
+			effect(body: () => (() => void) | void, label?: string): unknown;
+		}
 
 		//#region md5 — RFC 1321 over UTF-8 bytes (Web Crypto has no MD5)
 		var MD5_K = new Uint32Array(64);
@@ -30,7 +141,7 @@ window.__ModuleLoader__.load({
 			4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
 			6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
 		];
-		function md5hex(text) {
+		function md5hex(text: string): string {
 			var src = new TextEncoder().encode(text);
 			var len = src.length;
 			var bitLen = len * 8;
@@ -73,7 +184,7 @@ window.__ModuleLoader__.load({
 		var QUEUE_KEY = "dsh-gonic:queue";
 		var PLAYBACK_KEY = "dsh-gonic:playback";
 
-		function loadJSON(key, fallback) {
+		function loadJSON<T>(key: string, fallback: T): T {
 			try {
 				var raw = localStorage.getItem(key);
 				return raw ? JSON.parse(raw) : fallback;
@@ -81,13 +192,13 @@ window.__ModuleLoader__.load({
 				return fallback;
 			}
 		}
-		function saveJSON(key, value) {
+		function saveJSON(key: string, value: unknown): void {
 			try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* quota: keep session state only */ }
 		}
 
-		function createStore(initial) {
+		function createStore<T>(initial: T): Store<T> {
 			var state = initial;
-			var listeners = new Set();
+			var listeners = new Set<() => void>();
 			return {
 				get: function () { return state; },
 				update: function (patch) {
@@ -104,7 +215,7 @@ window.__ModuleLoader__.load({
 				},
 			};
 		}
-		function useStore(store) {
+		function useStore<T>(store: Store<T>): T {
 			if (React.useSyncExternalStore) {
 				return React.useSyncExternalStore(store.subscribe, store.get, store.get);
 			}
@@ -116,8 +227,8 @@ window.__ModuleLoader__.load({
 			return pair[0];
 		}
 
-		var configStore = createStore({ baseUrl: "", username: "", password: "", loaded: false });
-		function isConfigured(cfg) {
+		var configStore = createStore<ClientConfig>({ baseUrl: "", username: "", password: "", loaded: false });
+		function isConfigured(cfg: ClientConfig): boolean {
 			return Boolean(cfg && cfg.loaded && cfg.baseUrl && cfg.username && cfg.password);
 		}
 		/**
@@ -131,7 +242,7 @@ window.__ModuleLoader__.load({
 					configStore.replace({ baseUrl: view.baseUrl, username: view.username, password: view.password, loaded: true });
 					return;
 				}
-				var legacy = loadJSON(CONFIG_KEY, null);
+				var legacy = loadJSON<StoredConfig | null>(CONFIG_KEY, null);
 				if (legacy && legacy.baseUrl && legacy.username && legacy.password) {
 					fetch("/api/dsh-gonic/config", {
 						method: "POST",
@@ -153,10 +264,10 @@ window.__ModuleLoader__.load({
 			});
 		}
 
-		var queueStore = createStore(loadJSON(QUEUE_KEY, { tracks: [], cursor: -1, repeat: "off", shuffle: false }));
-		function persistQueue() { saveJSON(QUEUE_KEY, queueStore.get()); }
+		var queueStore = createStore<QueueState>(loadJSON<QueueState>(QUEUE_KEY, { tracks: [], cursor: -1, repeat: "off", shuffle: false }));
+		function persistQueue(): void { saveJSON(QUEUE_KEY, queueStore.get()); }
 		var queue = {
-			setList: function (tracks, startIndex) {
+			setList: function (tracks: Track[], startIndex?: number) {
 				queueStore.replace({
 					tracks: tracks.slice(),
 					cursor: tracks.length ? (typeof startIndex === "number" ? startIndex : 0) : -1,
@@ -165,12 +276,12 @@ window.__ModuleLoader__.load({
 				});
 				persistQueue();
 			},
-			append: function (track) {
+			append: function (track: Track) {
 				var q = queueStore.get();
 				queueStore.update({ tracks: q.tracks.concat([track]), cursor: q.tracks.length ? q.cursor : 0 });
 				persistQueue();
 			},
-			remove: function (index) {
+			remove: function (index: number) {
 				var q = queueStore.get();
 				var wasCurrent = index === q.cursor;
 				var tracks = q.tracks.filter(function (_, i) { return i !== index; });
@@ -206,26 +317,26 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		//#region subsonic client
-		function signParams(cfg) {
+		function signParams(cfg: ClientConfig) {
 			var saltBytes = new Uint8Array(8);
 			crypto.getRandomValues(saltBytes);
 			var salt = "";
 			for (var i = 0; i < saltBytes.length; i++) salt += saltBytes[i].toString(16).padStart(2, "0");
 			return { u: cfg.username, s: salt, t: md5hex(cfg.password + salt), v: "1.15.0", c: "dsh-gonic", f: "json" };
 		}
-		function endpoint(cfg, view, params) {
+		function endpoint(cfg: ClientConfig, view: string, params?: Record<string, string>): string {
 			var q = new URLSearchParams();
-			var auth = signParams(cfg);
+			var auth: Record<string, string> = signParams(cfg);
 			for (var k in auth) q.set(k, auth[k]);
 			if (params) for (var p in params) q.set(p, params[p]);
 			return cfg.baseUrl.replace(/\/+$/, "") + "/rest/" + view + "?" + q.toString();
 		}
-		async function api(cfg, view, params) {
-			var res;
+		async function api(cfg: ClientConfig, view: string, params?: Record<string, string>): Promise<LoosePayload> {
+			var res: Response;
 			try {
 				res = await fetch(endpoint(cfg, view, params));
 			} catch (error) {
-				throw new Error(t("err.network") + ": " + (error && error.message ? error.message : error));
+				throw new Error(t("err.network") + ": " + ((error as any) && (error as any).message ? (error as any).message : error));
 			}
 			if (!res.ok) throw new Error("HTTP " + res.status);
 			var json = await res.json();
@@ -235,7 +346,7 @@ window.__ModuleLoader__.load({
 			}
 			return body;
 		}
-		function toTrack(song) {
+		function toTrack(song: LoosePayload): Track {
 			return {
 				id: String(song && song.id != null ? song.id : ""),
 				title: (song && song.title) || "?",
@@ -245,14 +356,14 @@ window.__ModuleLoader__.load({
 				coverId: (song && (song.coverArt || song.id)) || "",
 			};
 		}
-		function toTracks(list) {
+		function toTracks(list: unknown): Track[] {
 			return (Array.isArray(list) ? list : []).filter(function (s) { return s && s.id != null; }).map(toTrack);
 		}
 		/**
 		 * Walk the catalogue like muse's SubsonicSource.browse: the root is a
 		 * menu, every other level is addressed by a `<kind>:<id>` path.
 		 */
-		async function browse(cfg, path) {
+		async function browse(cfg: ClientConfig, path: string): Promise<BrowseResult> {
 			if (!path) {
 				return {
 					nodes: [
@@ -271,8 +382,8 @@ window.__ModuleLoader__.load({
 			if (kind === "artists") {
 				var ab = await api(cfg, "getArtists.view");
 				var index = (ab.artists && ab.artists.index) || [];
-				var artists = [];
-				index.forEach(function (entry) { (entry.artist || []).forEach(function (a) { artists.push(a); }); });
+				var artists: LoosePayload[] = [];
+				index.forEach(function (entry: LoosePayload) { (entry.artist || []).forEach(function (a: LoosePayload) { artists.push(a); }); });
 				return {
 					nodes: artists.filter(function (a) { return a && a.id; }).map(function (a) {
 						return { path: "artist:" + a.id, label: (a.name || "").trim() || String(a.id), detail: a.albumCount ? a.albumCount + " " + t("unit.album") : "" };
@@ -299,10 +410,10 @@ window.__ModuleLoader__.load({
 			if (kind === "genres") {
 				var gb = await api(cfg, "getGenres.view");
 				var genres = ((gb.genres && gb.genres.genre) || [])
-					.filter(function (g) { return g && (g.value || "").trim() !== ""; })
-					.sort(function (a, b) { return (b.songCount || 0) - (a.songCount || 0); });
+					.filter(function (g: LoosePayload) { return g && (g.value || "").trim() !== ""; })
+					.sort(function (a: LoosePayload, b: LoosePayload) { return (b.songCount || 0) - (a.songCount || 0); });
 				return {
-					nodes: genres.map(function (g) {
+					nodes: genres.map(function (g: LoosePayload) {
 						return { path: "genre:" + g.value, label: g.value, detail: g.songCount ? g.songCount + " " + t("unit.song") : "" };
 					}),
 					tracks: [],
@@ -318,14 +429,14 @@ window.__ModuleLoader__.load({
 			}
 			throw new Error("unknown browse path: " + path);
 		}
-		function albumNodes(albums) {
+		function albumNodes(albums: LoosePayload[]): BrowseNode[] {
 			return albums.filter(function (al) { return al && al.id; }).map(function (al) {
 				var name = (al.name || al.title || "").trim() || String(al.id);
 				var label = (al.artist || "").trim() ? name + " · " + al.artist.trim() : name;
 				return { path: "album:" + al.id, label: label, detail: al.songCount ? al.songCount + " " + t("unit.song") : "" };
 			});
 		}
-		function coverUrl(cfg, coverId, size) {
+		function coverUrl(cfg: ClientConfig, coverId: string, size?: number): string {
 			return endpoint(cfg, "getCoverArt.view", { id: coverId, size: String(size || 64) });
 		}
 		//#endregion
@@ -333,8 +444,8 @@ window.__ModuleLoader__.load({
 		//#region player — one Audio element per module run
 		var audio = new Audio();
 		audio.preload = "auto";
-		var resumeCache = loadJSON(PLAYBACK_KEY, null);
-		var player = createStore({
+		var resumeCache = loadJSON<PlaybackSnapshot | null>(PLAYBACK_KEY, null);
+		var player = createStore<PlayerState>({
 			status: "idle", // idle | loading | playing | paused | error
 			position: 0,
 			duration: 0,
@@ -343,12 +454,12 @@ window.__ModuleLoader__.load({
 		});
 		audio.volume = player.get().volume / 100;
 
-		function persistPlayback() {
+		function persistPlayback(): void {
 			var q = queueStore.get();
 			var cur = q.cursor >= 0 ? q.tracks[q.cursor] : null;
 			saveJSON(PLAYBACK_KEY, { id: cur ? cur.id : null, position: audio.currentTime || 0, volume: player.get().volume });
 		}
-		function playAt(index) {
+		function playAt(index: number): void {
 			var cfg = configStore.get();
 			var q = queueStore.get();
 			var track = q.tracks[index];
@@ -374,12 +485,12 @@ window.__ModuleLoader__.load({
 			}
 			persistPlayback();
 		}
-		function playTracks(tracks, startIndex) {
+		function playTracks(tracks: Track[], startIndex?: number): void {
 			if (!tracks.length) return;
 			queue.setList(tracks, startIndex);
 			playAt(typeof startIndex === "number" ? startIndex : 0);
 		}
-		function toggle() {
+		function toggle(): void {
 			var q = queueStore.get();
 			if (!q.tracks.length) return;
 			if (audio.src && q.cursor >= 0) {
@@ -389,7 +500,7 @@ window.__ModuleLoader__.load({
 				playAt(q.cursor >= 0 ? q.cursor : 0);
 			}
 		}
-		function nextTrack(auto) {
+		function nextTrack(auto?: boolean): void {
 			var q = queueStore.get();
 			if (!q.tracks.length) return;
 			if (auto && q.repeat === "one") {
@@ -410,7 +521,7 @@ window.__ModuleLoader__.load({
 			}
 			playAt(ni);
 		}
-		function prevTrack() {
+		function prevTrack(): void {
 			var q = queueStore.get();
 			if (!q.tracks.length) return;
 			if (audio.currentTime > 3 || q.cursor <= 0) {
@@ -420,19 +531,19 @@ window.__ModuleLoader__.load({
 			}
 			playAt(q.cursor - 1);
 		}
-		function stopPlayback() {
+		function stopPlayback(): void {
 			audio.pause();
 			audio.removeAttribute("src");
 			try { audio.load(); } catch (_) { /* element already gone */ }
 			player.update({ status: "idle", position: 0, duration: 0 });
 			persistPlayback();
 		}
-		function seek(sec) {
+		function seek(sec: number): void {
 			if (!audio.src) return;
 			try { audio.currentTime = sec; } catch (_) { return; }
 			player.update({ position: sec });
 		}
-		function setVolume(v) {
+		function setVolume(v: number): void {
 			v = Math.min(100, Math.max(0, Math.round(v)));
 			audio.volume = v / 100;
 			player.update({ volume: v });
@@ -458,14 +569,14 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		//#region icons — small original SVG glyphs, currentColor
-		function fillIcon(d) {
-			return function (size) {
+		function fillIcon(d: string) {
+			return function (size?: number) {
 				return h("svg", { viewBox: "0 0 24 24", width: size || 18, height: size || 18, fill: "currentColor", "aria-hidden": true },
 					h("path", { d: d }));
 			};
 		}
-		function strokeIcon(paths) {
-			return function (size) {
+		function strokeIcon(paths: string[]) {
+			return function (size?: number) {
 				return h("svg", {
 					viewBox: "0 0 24 24", width: size || 18, height: size || 18, fill: "none",
 					stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true,
@@ -479,7 +590,7 @@ window.__ModuleLoader__.load({
 		var icoPlus = strokeIcon(["M12 5v14", "M5 12h14"]);
 		var icoX = strokeIcon(["M6 6l12 12", "M18 6L6 18"]);
 		var icoRefresh = strokeIcon(["M20 8A9 9 0 1 0 20.9 13", "M20 3v5h-5"]);
-		var icoSearch = function (size) {
+		var icoSearch = function (size?: number) {
 			return h("svg", {
 				viewBox: "0 0 24 24", width: size || 18, height: size || 18, fill: "none",
 				stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", "aria-hidden": true,
@@ -487,7 +598,7 @@ window.__ModuleLoader__.load({
 		};
 		var icoRepeat = strokeIcon(["M17 7H7v4", "M7 17h10v-4", "M14 4l3 3-3 3", "M10 20l-3-3 3-3"]);
 		var icoShuffle = strokeIcon(["M3 7h4l10 10h4", "M18 14l3 3-3 3", "M3 17h4l2.5-2.5", "M13.5 9.5L17 7h4", "M18 4l3 3-3 3"]);
-		function PanelIcon(props) {
+		function PanelIcon(props: { size?: number; active?: boolean }) {
 			var size = (props && props.size) || 20;
 			var color = props && props.active ? "var(--dsw-alias-brand-primary)" : "currentColor";
 			return h("svg", { viewBox: "0 0 24 24", width: size, height: size, fill: "none", "aria-hidden": true },
@@ -556,17 +667,17 @@ window.__ModuleLoader__.load({
 			".dsg-progress>i{display:block;height:100%;background:var(--dsw-alias-brand-primary)}",
 			".dsg-cover-sm{width:22px;height:22px;border-radius:4px;object-fit:cover;background:var(--dsw-alias-bg-layer-2);flex:none}",
 		].join("\n");
-		function fmt(sec) {
+		function fmt(sec: number): string {
 			sec = Math.max(0, Math.floor(sec || 0));
 			return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
 		}
-		function hostOf(baseUrl) {
+		function hostOf(baseUrl: string): string {
 			try { return new URL(baseUrl).host; } catch (_) { return baseUrl; }
 		}
 		//#endregion
 
 		//#region track list + player bar
-		function Cover(props) {
+		function Cover(props: { coverId?: string; small?: boolean }) {
 			var cfg = useStore(configStore);
 			if (!props.coverId || !isConfigured(cfg)) {
 				return h("span", { className: "dsg-cover dsg-cover-ph" }, icoPlay(14));
@@ -579,7 +690,7 @@ window.__ModuleLoader__.load({
 			});
 		}
 
-		function TrackList(props) {
+		function TrackList(props: { tracks: Track[]; emptyText?: string }) {
 			var q = useStore(queueStore);
 			var p = useStore(player);
 			var cur = q.cursor >= 0 ? q.tracks[q.cursor] : null;
@@ -650,8 +761,8 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		//#region tabs
-		function useRemoteLoad(loader, deps) {
-			var pair = React.useState({ loading: true, error: "", data: null });
+		function useRemoteLoad<T>(loader: () => Promise<T>, deps: React.DependencyList): RemoteLoad<T> {
+			var pair = React.useState<{ loading: boolean; error: string; data: T | null }>({ loading: true, error: "", data: null });
 			var state = pair[0], setState = pair[1];
 			var seq = React.useRef(0);
 			var reload = React.useCallback(function () {
@@ -667,7 +778,7 @@ window.__ModuleLoader__.load({
 			return [state, reload];
 		}
 
-		function ErrorLine(props) {
+		function ErrorLine(props: { text: string; onRetry: () => void }) {
 			return h("div", { className: "dsg-err" },
 				props.text + " ",
 				h("button", { className: "dsg-crumb", onClick: props.onRetry }, t("retry")));
@@ -712,7 +823,7 @@ window.__ModuleLoader__.load({
 			var cfg = useStore(configStore);
 			var inputPair = React.useState("");
 			var text = inputPair[0], setText = inputPair[1];
-			var resultPair = React.useState(null); // null | { loading } | { tracks } | { error }
+			var resultPair = React.useState<{ loading?: boolean; tracks?: Track[]; error?: string } | null>(null); // null | { loading } | { tracks } | { error }
 			var result = resultPair[0], setResult = resultPair[1];
 			var seq = React.useRef(0);
 			function run() {
@@ -757,7 +868,7 @@ window.__ModuleLoader__.load({
 				h("div", { className: "dsg-toolbar" },
 					h("span", { className: "dsg-sub" }, state.data ? state.data.length + " " + t("unit.song") : ""),
 					h("span", { className: "dsg-spacer" }),
-					state.data && state.data.length > 0 ? h("button", { className: "dsg-btn", onClick: function () { playTracks(state.data, 0); } }, icoPlay(13), t("play.all")) : null,
+					state.data && state.data.length > 0 ? h("button", { className: "dsg-btn", onClick: function () { playTracks(state.data as Track[], 0); } }, icoPlay(13), t("play.all")) : null,
 					h("button", { className: "dsg-ib", title: t("refresh"), onClick: reload }, icoRefresh(14))),
 				state.error ? h(ErrorLine, { text: state.error, onRetry: reload }) : null,
 				state.loading ? h("div", { className: "dsg-empty" }, t("loading")) : null,
@@ -766,11 +877,11 @@ window.__ModuleLoader__.load({
 
 		function PlaylistsTab() {
 			var cfg = useStore(configStore);
-			var detailPair = React.useState(null); // {id,name} | null
+			var detailPair = React.useState<PlaylistRef | null>(null); // {id,name} | null
 			var detail = detailPair[0], setDetail = detailPair[1];
-			var listLoaded = useRemoteLoad(function () {
+			var listLoaded = useRemoteLoad<PlaylistRow[]>(function () {
 				return api(cfg, "getPlaylists.view").then(function (body) {
-					return ((body.playlists && body.playlists.playlist) || []).map(function (pl) {
+					return ((body.playlists && body.playlists.playlist) || []).map(function (pl: LoosePayload) {
 						return { id: String(pl.id), name: pl.name || String(pl.id), count: pl.songCount || 0 };
 					});
 				});
@@ -788,7 +899,7 @@ window.__ModuleLoader__.load({
 						h("button", { className: "dsg-crumb", onClick: function () { setDetail(null); } }, "‹ " + t("back")),
 						h("span", { className: "dsg-title", style: { fontSize: "13px" } }, detail.name),
 						h("span", { className: "dsg-spacer" }),
-						state.data && state.data.length > 0 ? h("button", { className: "dsg-btn", onClick: function () { playTracks(state.data, 0); } }, icoPlay(13), t("play.all")) : null,
+						state.data && state.data.length > 0 ? h("button", { className: "dsg-btn", onClick: function () { playTracks(state.data as Track[], 0); } }, icoPlay(13), t("play.all")) : null,
 						h("button", { className: "dsg-ib", title: t("refresh"), onClick: reloadDetail }, icoRefresh(14))),
 					state.error ? h(ErrorLine, { text: state.error, onRetry: reloadDetail }) : null,
 					state.loading ? h("div", { className: "dsg-empty" }, t("loading")) : null,
@@ -846,7 +957,7 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		//#region settings form (settings.section + in-page gate)
-		function SettingsForm(props) {
+		function SettingsForm(props: { onSaved?: () => void; after?: React.ReactNode }) {
 			var cfg = useStore(configStore);
 			var urlPair = React.useState(cfg.baseUrl || "");
 			var baseUrl = urlPair[0], setBaseUrl = urlPair[1];
@@ -927,7 +1038,7 @@ window.__ModuleLoader__.load({
 				return h("div", { className: "dsg-page" }, h("style", null, CSS), head,
 					h("div", { className: "dsg-content", key: "content" }, h(SettingsForm, null)));
 			}
-			var content = null;
+			var content: React.ReactNode = null;
 			if (tab === "browse") content = h(BrowseTab, null);
 			else if (tab === "search") content = h(SearchTab, null);
 			else if (tab === "starred") content = h(StarredTab, null);
@@ -971,7 +1082,7 @@ window.__ModuleLoader__.load({
 				h("div", { className: "dsg-progress" }, h("i", { style: { width: (frac * 100).toFixed(1) + "%" } })));
 		}
 
-		function SettingsSection(props) {
+		function SettingsSection(props: { close?: () => void }) {
 			var cfg = useStore(configStore);
 			if (!cfg.loaded) return h("div", null, h("style", null, CSS), h("div", { className: "dsg-empty" }, t("loading")));
 			return h("div", null, h("style", null, CSS), h(SettingsForm, {
@@ -1108,8 +1219,8 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		// Module-level seats filled by apply: translate + layout navigation.
-		var t = function (key) { return key; };
-		var layoutRef = null;
+		var t: (key: string) => string = function (key) { return key; };
+		var layoutRef: LayoutRef | null = null;
 
 		//#region play-command claiming — one executor per command across tabs
 		var CLAIM_KEY = "dsh-gonic:play-claims";
@@ -1120,15 +1231,15 @@ window.__ModuleLoader__.load({
 		 * is effectively race-free. When localStorage is unavailable, prefer
 		 * playing (single-tab fallback) over silence.
 		 */
-		function claimCommand(ts) {
+		function claimCommand(ts: number): boolean {
 			try {
-				var claims = loadJSON(CLAIM_KEY, {});
+				var claims = loadJSON<Record<string, number>>(CLAIM_KEY, {});
 				if (claims[ts]) return false;
 				claims[ts] = Date.now();
 				var keys = Object.keys(claims);
 				if (keys.length > 20) {
 					keys.sort(function (a, b) { return claims[a] - claims[b]; });
-					while (keys.length > 20) delete claims[keys.shift()];
+					while (keys.length > 20) delete claims[keys.shift() as string];
 				}
 				saveJSON(CLAIM_KEY, claims);
 				return true;
@@ -1142,7 +1253,7 @@ window.__ModuleLoader__.load({
 		 * Register locales, the player lifecycle effect, and every slot.
 		 * @param ctx - client root context.
 		 */
-		function apply(ctx) {
+		function apply(ctx: ClientContext): void {
 			ctx.locale.register("dsh-gonic", "en", DICT_EN);
 			ctx.locale.register("dsh-gonic", "zh", DICT_ZH);
 			ctx.locale.register("dsh-gonic", "zh-CN", DICT_ZH);
@@ -1178,9 +1289,9 @@ window.__ModuleLoader__.load({
 						if (cmd.ts <= lastTs) return;
 						lastTs = cmd.ts;
 						if (!claimCommand(cmd.ts)) return;
-						var tracks = (Array.isArray(cmd.tracks) ? cmd.tracks : []).filter(function (tr) {
+						var tracks = (Array.isArray(cmd.tracks) ? cmd.tracks : []).filter(function (tr: LoosePayload) {
 							return tr && tr.id != null && tr.id !== "";
-						}).map(function (tr) {
+						}).map(function (tr: LoosePayload) {
 							return {
 								id: String(tr.id),
 								title: tr.title || "?",

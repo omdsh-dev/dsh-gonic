@@ -5,6 +5,12 @@
   "description": "Gonic/Subsonic music player for the DeepSeek Harness Web GUI: browse, search, stars, playlists, queue and in-GUI playback, plus agent tools (search/browse/starred/playlists/create-playlist) over your library and a gonic_play command channel that starts playback in the user's browser.",
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -32,7 +38,27 @@
   "icon": "./icon.svg",
   "license": "MIT",
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6 || ^0.2.0-rc.2"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6 || ^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.0-rc.6 || ^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6 || ^0.2.0-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.6 || ^0.2.0-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6 || ^0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6 || ^0.2.0-rc.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-host-webserver": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.2.1-rc.5",
+    "@deepseek-ai/dsh-sandbox": "^0.2.1-rc.5",
+    "@deepseek-ai/dsh-scope": "^0.2.1-rc.5",
+    "@deepseek-ai/dsh-system-prompt": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.5",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",

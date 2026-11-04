@@ -13,13 +13,18 @@
  * cannot control what is currently playing.
  *
  * Pure ESM, no runtime dependencies beyond @deepseek-ai/dsh-tools (provided
- * by the Host). No build step.
+ * by the Host). Source is TypeScript (src/); lib/ is tsc output.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import type { Context } from "@deepseek-ai/cordis";
+// Type-only import: pulls in the `Context.systemPrompt` service augmentation.
+import type {} from "@deepseek-ai/dsh-system-prompt";
+import type { WebRoute } from "@deepseek-ai/dsh-host-webserver";
 
 /** Stable cordis plugin name. */
 const name = "gonic";
@@ -42,20 +47,81 @@ const MAX_JSON_BODY_BYTES = 64 * 1024;
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
 const GONIC_GUIDANCE = "本机已安装 dsh-gonic 插件（Gonic/Subsonic 音乐库集成）：配置好服务器后，可用 gonic_search 按关键词搜歌，gonic_browse 浏览曲库（空路径给出根菜单：艺人/专辑/风格/最近添加/随机；用 artist:<id>、album:<id>、genre:<名> 逐层下钻），gonic_starred 查看已加星的歌曲，gonic_playlists / gonic_playlist 查看歌单列表与详情，gonic_create_playlist 用曲目 id 列表创建新歌单（先用 gonic_search 凑齐 id），gonic_play 让用户浏览器里的播放器开播（playlistId 播整个歌单 / trackIds 播指定曲目 / query 搜索并播放前 N 首，可用 limit 控制）。gonic_status 查看连接与配置状态；也可以在 Web 设置页「Gonic 播放器」面板中配置。用户提到「我的曲库 / 音乐 / 歌单」并想查找或整理时即指本插件；用户说「播放 / 放歌 / 我想听…」时用 gonic_play。注意：gonic_play 通过 Host→浏览器指令通道驱动用户浏览器里的播放器（替换其播放队列并开播），需要用户的浏览器开着 DSH GUI 且页面有过点击（浏览器自动播放策略），指令几秒内生效；暂停、切歌、音量仍由用户在播放器 UI 上控制，工具不提供。曲库写操作仅限创建歌单（不提供修改、删除、加星）。";
 
+/** Persisted credential record (~/.dsh/dsh-gonic.json). */
+interface GonicConfigRecord {
+	baseUrl: string;
+	username: string;
+	password: string;
+}
+
+/** Config write input (a JSON boundary — every field is coerced before use). */
+interface ConfigInput {
+	baseUrl?: unknown;
+	username?: unknown;
+	password?: unknown;
+}
+
+/** Public config view: configured flag, base URL, username, and the password. */
+interface ConfigView {
+	configured: boolean;
+	baseUrl: string;
+	username: string;
+	password: string;
+}
+
+/** One track row in tool outputs (the shape toTrack() emits). */
+type Track = {
+	id: string;
+	title: string;
+	artist: string;
+	album: string;
+	duration: number;
+};
+
+/** One browse node (folder-like catalogue entry) in tool outputs. */
+type BrowseNode = {
+	path: string;
+	label: string;
+	detail?: string;
+};
+
+/** One browse() result: folder nodes plus (at leaf levels) tracks. */
+type BrowseResult = {
+	nodes: BrowseNode[];
+	tracks: Track[];
+};
+
+/** One playlist summary row in the gonic_playlists output. */
+type PlaylistSummary = {
+	id: string;
+	name: string;
+	songCount: number;
+};
+
+/** One queued play command handed to the browser via the play-command slot. */
+type PlayCommand = {
+	ts: number;
+	title: string;
+	tracks: Track[];
+};
+
+/** Parsed subsonic-response payload: raw JSON whose fields are re-validated at each use site. */
+type LoosePayload = Record<string, any>;
+
 /** One text content block (the only render shape these tools emit). */
-function text(value) {
+function text(value: string): { type: "text"; text: string }[] {
 	return [{ type: "text", text: value }];
 }
 
 /** Normalize a server base URL: trim, default to http, drop trailing slashes. */
-function normalizeBaseUrl(value) {
+function normalizeBaseUrl(value: unknown): string {
 	let url = String(value || "").trim();
 	if (!url) return "";
 	// Prepend http:// only when there is no scheme at all — otherwise a
 	// non-http scheme (ftp://, gonic://…) would be swallowed into a bogus
 	// http:// host instead of hitting the protocol check below.
 	if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = "http://" + url;
-	let parsed;
+	let parsed: URL;
 	try {
 		parsed = new URL(url);
 	} catch {
@@ -69,42 +135,50 @@ function normalizeBaseUrl(value) {
 }
 
 /** Clamp an integer list-size argument. */
-function clampLimit(value, fallback, max) {
+function clampLimit(value: unknown, fallback: number, max: number): number {
 	const n = Number(value);
 	if (!Number.isFinite(n) || n <= 0) return fallback;
 	return Math.min(Math.floor(n), max);
 }
 
 /** Format seconds as m:ss. */
-function fmt(sec) {
+function fmt(sec: number): string {
 	sec = Math.max(0, Math.floor(Number(sec) || 0));
 	return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
 }
 
 //#region config store — ~/.dsh/dsh-gonic.json, mode 0600
+/**
+ * Small credential store backed by ~/.dsh/dsh-gonic.json (dsh-memos
+ * MemosStore template). Reads are lazy and cached; writes create the
+ * directory with mode 0700 and rewrite the file with mode 0600.
+ */
 class GonicStore {
+	declare file: string;
+	declare config: GonicConfigRecord | null;
 	constructor(file = CONFIG_FILE) {
 		this.file = file;
-		this.cache = void 0;
+		this.config = null;
 	}
-	async load() {
+	async load(): Promise<GonicConfigRecord> {
+		if (this.config !== null) return this.config;
 		try {
 			const raw = await readFile(this.file, "utf8");
 			const parsed = JSON.parse(raw);
-			this.cache = {
+			this.config = {
 				baseUrl: typeof parsed?.baseUrl === "string" ? parsed.baseUrl : "",
 				username: typeof parsed?.username === "string" ? parsed.username : "",
 				password: typeof parsed?.password === "string" ? parsed.password : ""
 			};
 		} catch {
-			this.cache = { baseUrl: "", username: "", password: "" };
+			this.config = { baseUrl: "", username: "", password: "" };
 		}
-		return this.cache;
+		return this.config;
 	}
-	async get() {
-		return this.cache ?? this.load();
+	async get(): Promise<GonicConfigRecord> {
+		return this.config ?? this.load();
 	}
-	async save(input) {
+	async save(input: ConfigInput): Promise<GonicConfigRecord> {
 		const next = {
 			baseUrl: normalizeBaseUrl(input?.baseUrl),
 			username: String(input?.username ?? "").trim(),
@@ -112,21 +186,22 @@ class GonicStore {
 		};
 		await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
 		await writeFile(this.file, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
-		this.cache = next;
+		this.config = next;
 		return next;
 	}
+	/** Full view incl. password: the browser client signs its own direct API/stream calls. */
+	view(): ConfigView {
+		const cfg = this.config ?? { baseUrl: "", username: "", password: "" };
+		return {
+			configured: configured(cfg),
+			baseUrl: cfg.baseUrl || "",
+			username: cfg.username || "",
+			password: cfg.password || ""
+		};
+	}
 }
-function configured(cfg) {
+function configured(cfg: GonicConfigRecord | null | undefined): boolean {
 	return Boolean(cfg && cfg.baseUrl && cfg.username && cfg.password);
-}
-/** Full view incl. password: the browser client signs its own direct API/stream calls. */
-function viewOf(cfg) {
-	return {
-		configured: configured(cfg),
-		baseUrl: cfg.baseUrl || "",
-		username: cfg.username || "",
-		password: cfg.password || ""
-	};
 }
 //#endregion
 
@@ -139,21 +214,22 @@ function viewOf(cfg) {
  * older than its own page load (baseline), so nothing stale can fire.
  */
 class PlayCommandStore {
+	declare command: PlayCommand;
 	constructor() {
 		this.command = { ts: 0, title: "", tracks: [] };
 	}
-	publish(title, tracks) {
+	publish(title: string, tracks: Track[]): PlayCommand {
 		this.command = { ts: Date.now(), title: String(title || ""), tracks: Array.isArray(tracks) ? tracks : [] };
 		return this.command;
 	}
-	get() {
+	get(): PlayCommand {
 		return this.command;
 	}
 }
 //#endregion
 
 //#region subsonic client (Host side)
-function endpoint(cfg, view, params) {
+function endpoint(cfg: GonicConfigRecord, view: string, params?: Record<string, string | string[]>): string {
 	const salt = randomBytes(8).toString("hex");
 	const q = new URLSearchParams();
 	q.set("u", cfg.username);
@@ -168,10 +244,10 @@ function endpoint(cfg, view, params) {
 	}
 	return cfg.baseUrl.replace(/\/+$/, "") + "/rest/" + view + "?" + q.toString();
 }
-async function api(cfg, view, params) {
+async function api(cfg: GonicConfigRecord, view: string, params?: Record<string, string | string[]>): Promise<LoosePayload> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-	let res;
+	let res: Response;
 	try {
 		res = await fetch(endpoint(cfg, view, params), { signal: controller.signal });
 	} catch (error) {
@@ -186,7 +262,7 @@ async function api(cfg, view, params) {
 	}
 	return body;
 }
-function toTrack(song) {
+function toTrack(song: LoosePayload): Track {
 	return {
 		id: String(song?.id ?? ""),
 		title: song?.title || "?",
@@ -195,8 +271,8 @@ function toTrack(song) {
 		duration: Math.max(0, Math.floor(song?.duration || 0))
 	};
 }
-const toTracks = (list) => (Array.isArray(list) ? list : []).filter((s) => s && s.id != null).map(toTrack);
-function albumNodes(albums) {
+const toTracks = (list: unknown): Track[] => (Array.isArray(list) ? list : []).filter((s) => s && s.id != null).map(toTrack);
+function albumNodes(albums: unknown): BrowseNode[] {
 	return (Array.isArray(albums) ? albums : []).filter((al) => al && al.id).map((al) => {
 		const label0 = (al.name || al.title || "").trim() || String(al.id);
 		return {
@@ -207,7 +283,7 @@ function albumNodes(albums) {
 	});
 }
 /** Same walk as the browser client's browse(): root menu, then <kind>:<id>. */
-async function browse(cfg, path0) {
+async function browse(cfg: GonicConfigRecord, path0: string): Promise<BrowseResult> {
 	if (!path0) {
 		return {
 			nodes: [
@@ -226,9 +302,9 @@ async function browse(cfg, path0) {
 	switch (kind) {
 		case "artists": {
 			const body = await api(cfg, "getArtists.view");
-			const artists = (body.artists?.index ?? []).flatMap((entry) => entry.artist ?? []);
+			const artists = (body.artists?.index ?? []).flatMap((entry: LoosePayload) => entry.artist ?? []);
 			return {
-				nodes: artists.filter((a) => a && a.id).map((a) => ({
+				nodes: artists.filter((a: LoosePayload) => a && a.id).map((a: LoosePayload) => ({
 					path: "artist:" + a.id,
 					label: (a.name || "").trim() || String(a.id),
 					detail: a.albumCount ? a.albumCount + " 张" : ""
@@ -255,10 +331,10 @@ async function browse(cfg, path0) {
 		case "genres": {
 			const body = await api(cfg, "getGenres.view");
 			const genres = (body.genres?.genre ?? [])
-				.filter((g) => g && (g.value || "").trim() !== "")
-				.sort((a, b) => (b.songCount || 0) - (a.songCount || 0));
+				.filter((g: LoosePayload) => g && (g.value || "").trim() !== "")
+				.sort((a: LoosePayload, b: LoosePayload) => (b.songCount || 0) - (a.songCount || 0));
 			return {
-				nodes: genres.map((g) => ({ path: "genre:" + g.value, label: g.value, detail: g.songCount ? g.songCount + " 首" : "" })),
+				nodes: genres.map((g: LoosePayload) => ({ path: "genre:" + g.value, label: g.value, detail: g.songCount ? g.songCount + " 首" : "" })),
 				tracks: []
 			};
 		}
@@ -277,7 +353,7 @@ async function browse(cfg, path0) {
 //#endregion
 
 //#region render helpers
-function renderTrackList(title, tracks, withIds) {
+function renderTrackList(title: string, tracks: Track[], withIds: boolean): string {
 	if (!tracks.length) return title + "：无曲目";
 	const lines = tracks.map((track, i) => {
 		const base = `${i + 1}. ${track.title} — ${track.artist || "—"}${track.album ? " · " + track.album : ""} (${fmt(track.duration)})`;
@@ -285,13 +361,13 @@ function renderTrackList(title, tracks, withIds) {
 	});
 	return title + "（共 " + tracks.length + " 首）\n" + lines.join("\n");
 }
-function renderNodes(nodes) {
+function renderNodes(nodes: BrowseNode[]): string {
 	return nodes.map((n) => `- ${n.label}${n.detail ? "（" + n.detail + "）" : ""} → ${n.path}`).join("\n");
 }
 //#endregion
 
 //#region tools
-function gonicStatusTool(store) {
+function gonicStatusTool(store: GonicStore) {
 	return defineTool({
 		name: "gonic_status",
 		description: "查看 dsh-gonic（Gonic/Subsonic 音乐库）插件的连接与配置状态：是否已配置、服务器地址、用户名，以及服务器是否可达（ping）。不会回显密码。",
@@ -323,7 +399,7 @@ function gonicStatusTool(store) {
 	});
 }
 
-function gonicSearchTool(store) {
+function gonicSearchTool(store: GonicStore) {
 	return defineTool({
 		name: "gonic_search",
 		description: "在用户的 Gonic/Subsonic 音乐库里按关键词搜索歌曲。返回曲目列表（标题、艺人、专辑、时长、id）；创建歌单需要曲目 id 时先调本工具凑齐。",
@@ -344,7 +420,7 @@ function gonicSearchTool(store) {
 			},
 			render: (args, value) => {
 				if (!value.ok) return text("[failed] " + value.message);
-				return text(renderTrackList(`搜索 ${JSON.stringify(args.query ?? "")}`, Array.isArray(value.tracks) ? value.tracks : [], true));
+				return text(renderTrackList(`搜索 ${JSON.stringify(args.query ?? "")}`, Array.isArray(value.tracks) ? value.tracks as Track[] : [], true));
 			}
 		},
 		async execute(args) {
@@ -363,7 +439,7 @@ function gonicSearchTool(store) {
 	});
 }
 
-function gonicBrowseTool(store) {
+function gonicBrowseTool(store: GonicStore) {
 	return defineTool({
 		name: "gonic_browse",
 		description: "浏览用户的 Gonic/Subsonic 曲库。空路径返回根菜单（artists 艺人 / albums 专辑 / genres 风格 / recent 最近添加 / random 随机）；随后用返回的 path 逐层下钻：artist:<id> 列出该艺人专辑，album:<id> 列出专辑曲目，genre:<名称> 列出该风格歌曲。",
@@ -385,9 +461,9 @@ function gonicBrowseTool(store) {
 			render: (args, value) => {
 				if (!value.ok) return text("[failed] " + value.message);
 				const title = "浏览 " + (typeof args.path === "string" && args.path ? args.path : "根菜单");
-				const parts = [];
-				if (Array.isArray(value.nodes) && value.nodes.length) parts.push(renderNodes(value.nodes));
-				if (Array.isArray(value.tracks) && value.tracks.length) parts.push(renderTrackList(title, value.tracks, true));
+				const parts: string[] = [];
+				if (Array.isArray(value.nodes) && value.nodes.length) parts.push(renderNodes(value.nodes as BrowseNode[]));
+				if (Array.isArray(value.tracks) && value.tracks.length) parts.push(renderTrackList(title, value.tracks as Track[], true));
 				return text(parts.length ? title + "\n" + parts.join("\n") : title + "：空");
 			}
 		},
@@ -405,7 +481,7 @@ function gonicBrowseTool(store) {
 	});
 }
 
-function gonicStarredTool(store) {
+function gonicStarredTool(store: GonicStore) {
 	return defineTool({
 		name: "gonic_starred",
 		description: "列出用户在 Gonic/Subsonic 音乐库里加星的歌曲。",
@@ -423,7 +499,7 @@ function gonicStarredTool(store) {
 			},
 			render: (_args, value) => {
 				if (!value.ok) return text("[failed] " + value.message);
-				return text(renderTrackList("已加星的歌曲", Array.isArray(value.tracks) ? value.tracks : [], true));
+				return text(renderTrackList("已加星的歌曲", Array.isArray(value.tracks) ? value.tracks as Track[] : [], true));
 			}
 		},
 		async execute() {
@@ -440,7 +516,7 @@ function gonicStarredTool(store) {
 	});
 }
 
-function gonicPlaylistsTool(store) {
+function gonicPlaylistsTool(store: GonicStore) {
 	return defineTool({
 		name: "gonic_playlists",
 		description: "列出用户 Gonic/Subsonic 服务器上的全部歌单（名称、曲目数、id）；查看某个歌单内容用 gonic_playlist。",
@@ -458,7 +534,7 @@ function gonicPlaylistsTool(store) {
 			},
 			render: (_args, value) => {
 				if (!value.ok) return text("[failed] " + value.message);
-				const playlists = Array.isArray(value.playlists) ? value.playlists : [];
+				const playlists = Array.isArray(value.playlists) ? value.playlists as PlaylistSummary[] : [];
 				if (!playlists.length) return text("服务器上没有歌单");
 				return text("歌单（共 " + playlists.length + " 个）\n" + playlists.map((p) => `- ${p.name}（${p.songCount} 首）[id: ${p.id}]`).join("\n"));
 			}
@@ -468,7 +544,7 @@ function gonicPlaylistsTool(store) {
 			if (!configured(cfg)) return { ok: false, message: "尚未配置 Gonic 服务器" };
 			try {
 				const body = await api(cfg, "getPlaylists.view");
-				const playlists = (body.playlists?.playlist ?? []).map((p) => ({
+				const playlists = (body.playlists?.playlist ?? []).map((p: LoosePayload) => ({
 					id: String(p?.id ?? ""),
 					name: p?.name || String(p?.id ?? ""),
 					songCount: p?.songCount || 0
@@ -481,7 +557,7 @@ function gonicPlaylistsTool(store) {
 	});
 }
 
-function gonicPlaylistTool(store) {
+function gonicPlaylistTool(store: GonicStore) {
 	return defineTool({
 		name: "gonic_playlist",
 		description: "查看一个 Gonic/Subsonic 歌单的完整曲目列表。id 从 gonic_playlists 获取。",
@@ -502,7 +578,7 @@ function gonicPlaylistTool(store) {
 			},
 			render: (_args, value) => {
 				if (!value.ok) return text("[failed] " + value.message);
-				return text(renderTrackList("歌单 " + (value.name || ""), Array.isArray(value.tracks) ? value.tracks : [], true));
+				return text(renderTrackList("歌单 " + (value.name || ""), Array.isArray(value.tracks) ? value.tracks as Track[] : [], true));
 			}
 		},
 		async execute(args) {
@@ -521,7 +597,7 @@ function gonicPlaylistTool(store) {
 	});
 }
 
-function gonicCreatePlaylistTool(store) {
+function gonicCreatePlaylistTool(store: GonicStore) {
 	return defineTool({
 		name: "gonic_create_playlist",
 		description: "在用户的 Gonic/Subsonic 服务器上创建新歌单（写操作）。name 为歌单名；trackIds 为曲目 id 列表（先用 gonic_search / gonic_browse / gonic_playlist 等拿到 id），可省略创建空歌单。创建结果立即可在用户的播放器「歌单」页看到。",
@@ -566,7 +642,7 @@ function gonicCreatePlaylistTool(store) {
 	});
 }
 
-function gonicPlayTool(store, playStore) {
+function gonicPlayTool(store: GonicStore, playStore: PlayCommandStore) {
 	return defineTool({
 		name: "gonic_play",
 		description: "让用户的浏览器播放器播放音乐（替换其播放队列并开播）。三种选源方式必须且只能给一个：playlistId（播放整个歌单，id 从 gonic_playlists 获取）、trackIds（播放指定曲目，id 从 gonic_search / gonic_browse / gonic_playlist 等获取）、query（搜索并播放前 limit 首结果）。前提：用户的浏览器开着 DSH GUI 且页面有过点击（浏览器自动播放策略）；指令几秒内生效，暂停/切歌/音量在播放器 UI 上控制。",
@@ -590,7 +666,7 @@ function gonicPlayTool(store, playStore) {
 			},
 			render: (_args, value) => {
 				if (!value.ok) return text("[failed] " + value.message);
-				return text("[ok] " + value.message + "\n" + renderTrackList(value.title || "播放队列", Array.isArray(value.tracks) ? value.tracks : [], false));
+				return text("[ok] " + value.message + "\n" + renderTrackList(value.title || "播放队列", Array.isArray(value.tracks) ? value.tracks as Track[] : [], false));
 			}
 		},
 		async execute(args) {
@@ -603,8 +679,8 @@ function gonicPlayTool(store, playStore) {
 			if (given === 0) return { ok: false, message: "请提供 playlistId、trackIds 或 query 之一" };
 			if (given > 1) return { ok: false, message: "playlistId、trackIds、query 三者只能提供一个" };
 			try {
-				let title;
-				let tracks;
+				let title: string;
+				let tracks: Track[];
 				if (playlistId) {
 					const body = await api(cfg, "getPlaylist.view", { id: playlistId });
 					tracks = toTracks(body.playlist?.entry);
@@ -641,7 +717,7 @@ function gonicPlayTool(store, playStore) {
 //#endregion
 
 //#region http routes for the settings panel
-function writeJson(res, status, value) {
+function writeJson(res: ServerResponse, status: number, value: unknown): void {
 	const payload = JSON.stringify(value);
 	res.writeHead(status, {
 		"content-type": "application/json; charset=utf-8",
@@ -650,7 +726,7 @@ function writeJson(res, status, value) {
 	});
 	res.end(payload);
 }
-function readJsonBody(req) {
+function readJsonBody(req: IncomingMessage): Promise<any> {
 	return new Promise((resolve, reject) => {
 		let body = "";
 		req.setEncoding("utf8");
@@ -671,7 +747,7 @@ function readJsonBody(req) {
 		req.on("error", () => reject(new Error("request body could not be read")));
 	});
 }
-function makeRoutes(store, playStore) {
+function makeRoutes(store: GonicStore, playStore?: PlayCommandStore): WebRoute[] {
 	const commands = playStore || new PlayCommandStore();
 	return [
 		{
@@ -680,13 +756,14 @@ function makeRoutes(store, playStore) {
 			handler: async (req, res) => {
 				try {
 					if (req.method === "GET") {
-						writeJson(res, 200, { ok: true, ...viewOf(await store.get()) });
+						await store.get();
+						writeJson(res, 200, { ok: true, ...store.view() });
 						return;
 					}
 					if (req.method === "POST") {
 						const body = await readJsonBody(req);
-						const saved = await store.save(body);
-						writeJson(res, 200, { ok: true, ...viewOf(saved) });
+						await store.save(body);
+						writeJson(res, 200, { ok: true, ...store.view() });
 						return;
 					}
 					res.writeHead(405, { allow: "GET, POST" });
@@ -738,11 +815,32 @@ function makeRoutes(store, playStore) {
 //#endregion
 
 /**
+ * Host plugin context, typed as the real cordis Context: `tools` and
+ * `systemPrompt` resolve through the service augmentations shipped by
+ * @deepseek-ai/dsh-tools and @deepseek-ai/dsh-system-prompt (the latter via a
+ * type-only import above), and `effect` comes from cordis itself. The host
+ * composition exposes the webserver service under the name "webServer"
+ * (upstream augments it as `httpServer`), so that one member is declared
+ * locally with exactly the used surface.
+ */
+type GonicContext = Context & {
+	webServer: {
+		register(route: WebRoute): () => void;
+	};
+};
+
+/** Plugin config from the composition row. */
+interface ApplyConfig {
+	announceToAgent?: boolean;
+	enabled?: boolean;
+}
+
+/**
  * Mount the gonic tools, routes, and announcement.
  * @param ctx - host plugin context carrying tools/systemPrompt/webServer.
  * @param config - plugin config from the composition row.
  */
-function apply(ctx, config) {
+function apply(ctx: GonicContext, config?: ApplyConfig): void {
 	const announceToAgent = config?.announceToAgent !== false;
 	const enabled = config?.enabled !== false;
 	if (!enabled) return;

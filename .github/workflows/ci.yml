@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci --legacy-peer-deps
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Host entry import check
+        run: node -e "import('./lib/index.js').then(m=>console.log('exports:',Object.keys(m).length))"
+      - name: Pack dry-run
+        run: npm pack --dry-run
