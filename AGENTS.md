@@ -113,9 +113,16 @@ AGENTS.md             this file
   `lib/client.js` must contain **zero import/export statements** — type the
   script via top-level `interface Window { __ModuleLoader__: … }`
   augmentation and a typed `ModuleRequire` (see dsh-memos/src/client.ts).
-- Plain React via `createElement` (no JSX), inline styles only, no runtime
-  CSS framework. Use the DSH theme alias variables (`--dsw-*`) when styling
-  interactive UI so skins keep working.
+- Plain React via `createElement` (no JSX), no runtime CSS framework. Style
+  with the host's `--dsw-*` token layer: `dsh-client-ui-theme` defines
+  `--dsw-static-*` primitives and `--dsw-alias-*` semantic aliases on `body`
+  (light + `data-ds-dark-theme`), so tokens resolve **with or without a skin
+  plugin** — skins merely override the aliases. Inline style objects are fine
+  for layout; interactive controls (inputs, buttons) get a small injected
+  stylesheet so `:focus`/`:hover`/`:disabled` work (see `.dsm-*` in
+  dsh-memos/src/client.ts and `.dsg-*` in dsh-gonic/src/client.ts). Do not
+  hardcode grays — they break the stock dark theme even with no skin
+  installed.
 - Settings UI registers `settings.section` with an order from the §8
   registry; user-facing strings go through `locale/*.json` (`t(key)`).
 - Client build caveat registry (learned the hard way):
