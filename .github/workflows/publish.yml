@@ -1,0 +1,54 @@
+name: publish
+
+# Publishes this plugin to npm. Two paths, same job:
+#   - automatically when the release workflow publishes a GitHub Release
+#   - manually from the Actions tab (Actions -> publish -> Run workflow)
+#
+# Auth is OIDC trusted publishing: `permissions: id-token: write` lets npm
+# exchange the workflow's identity token for a short-lived publish token, so no
+# NPM_TOKEN secret is stored. The npmjs.com side must have a trusted publisher
+# configured for this repository and this workflow file (Settings -> Publishing
+# access / Trusted publisher); until then the publish step fails with 404/403.
+# Provenance attestations are signed via sigstore for every publish.
+#
+# The version comes from package.json, so releasing = bump the version, push to
+# main (release workflow creates the GitHub Release + tag), and this workflow
+# publishes that exact version. Re-runs are safe: an already-published version
+# is skipped instead of failing the job.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # OIDC token exchange for npm trusted publishing + provenance.
+  id-token: write
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Install and build
+        run: npm ci --legacy-peer-deps && npm run build
+      - name: Check whether this version is already on npm
+        id: check
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is already published — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "publishing $name@$version"
+          fi
+      - name: Publish to npm
+        if: steps.check.outputs.skip == 'false'
+        run: npm publish --provenance --access public

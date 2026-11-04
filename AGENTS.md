@@ -76,8 +76,8 @@ AGENTS.md             this file
   `0.2.1-rc.5`) so `tsc` and smoke tests resolve real types.
 - `dsh.bundle.patch` → `./cordis.patch.yml`; `dsh.client.inject` lists exactly
   the client services used; `dsh.client.platform: "web"`.
-- `private: true` until an npm release is intended; then drop it and add
-  `publishConfig.access: "public"`.
+- No `private` field; declare `publishConfig: { "access": "public" }` and
+  `repository`. Distribution is covered in §10.
 
 ## 4. Host-side patterns
 
@@ -188,3 +188,29 @@ server into the workflow.
   are copied per plugin from the dsh-memos template. The copy overhead is
   small and a package would add versioning/release coupling; revisit (as e.g.
   `dsh-plugin-kit`) when a fifth plugin appears or the copied surface grows.
+
+## 10. Distribution
+
+Two channels, both fed by the same version bump:
+
+- **GitHub Release tarball** (`release.yml`): every push to `main` packs
+  `npm pack` output → `dist/pkg.tgz` → creates or refreshes the `v<version>`
+  release. Installs with
+  `dsh plugin --profile web add ".../releases/latest/download/pkg.tgz"`.
+- **npm** (`publish.yml`): fires when that release is published (or manually).
+  Uses OIDC trusted publishing (`permissions: id-token: write`) with
+  `npm publish --provenance --access public` — no `NPM_TOKEN` secret is
+  stored, so the npmjs.com side must configure a trusted publisher for this
+  repository + `publish.yml`. An already-published version is skipped, so
+  re-runs are safe.
+
+Rules:
+
+- **No `private` field** — every plugin is publishable. `private: true` is the
+  only thing that blocks `npm publish` (note: `--dry-run` does NOT enforce it,
+  so it is not a CI safety net), and all four packages are unscoped npm names
+  that anyone could otherwise register.
+- `publishConfig: { "access": "public" }` and `repository` are declared on
+  every package for provenance linking and explicit intent.
+- Releasing = bump `version` in `package.json`, push to `main`. Never publish
+  a version from a dirty tree, and never reuse a version (npm is immutable).

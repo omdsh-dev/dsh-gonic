@@ -1,7 +1,6 @@
 {
   "name": "dsh-gonic",
   "version": "0.3.0",
-  "private": true,
   "description": "Gonic/Subsonic music player for the DeepSeek Harness Web GUI: browse, search, stars, playlists, queue and in-GUI playback, plus agent tools (search/browse/starred/playlists/create-playlist) over your library and a gonic_play command channel that starts playback in the user's browser.",
   "type": "module",
   "main": "lib/index.js",
@@ -76,5 +75,12 @@
       ],
       "platform": "web"
     }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/omdsh-dev/dsh-gonic.git"
   }
 }
