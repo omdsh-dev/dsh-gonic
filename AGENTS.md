@@ -1,8 +1,11 @@
 # DSH Plugin Conventions (omdsh-dev)
 
-This file is the shared engineering contract for the DSH plugins maintained in
-the `omdsh-dev` GitHub org. An identical copy lives in every plugin repo; when
-you change a convention, change every copy in the same PR series.
+This file collects the current engineering decisions and the hard-won caveats
+behind them for the DSH plugins maintained in the `omdsh-dev` GitHub org. It is
+a snapshot of reasoning, not authority: every rule here should carry its
+evidence and its expiry condition, and any rule whose premise no longer holds
+should be challenged and rewritten. An identical copy lives in every plugin
+repo; when a convention changes, change every copy in the same PR series.
 
 ## 1. Repository layout
 
@@ -21,10 +24,10 @@ AGENTS.md             this file
 .github/workflows/ci.yml
 ```
 
-## 2. TypeScript toolchain (the only sanctioned stack)
+## 2. TypeScript toolchain
 
-- **tsc only.** No eslint/knip/vitest/tsdown unless a repo genuinely outgrows
-  this. `typescript` is pinned to **^5.9.x** — TS 7 removed
+- **tsc only, deliberately minimal.** No eslint/knip/vitest/tsdown so far; add
+  one only when a concrete failure shows up that tsc cannot catch. `typescript` is pinned to **^5.9.x** — TS 7 removed
   `alwaysStrict: false` and would inject `"use strict"` into the classic-script
   client bundle.
 - `tsconfig.json` template (copy verbatim):
@@ -66,10 +69,11 @@ AGENTS.md             this file
   locale/ exists.
 - `engines`: `{ "node": "^22.19.0 || >=24.0.0", "dsh": ">=0.2.1-rc.2 <0.3.0" }`.
 - Dependencies the **host provides at runtime** (anything `@deepseek-ai/*`,
-  react/react-dom for the client) are declared as **peerDependencies**; the
-  same packages are repeated in **devDependencies** (pinned to the host's
-  bundled versions, currently `0.2.1-rc.5`) so `tsc` and smoke tests resolve
-  real types. Never add runtime `dependencies` on host packages.
+  react/react-dom for the client) are declared as **peerDependencies** — the
+  host must remain the single runtime copy; vendoring them would split module
+  identity and version-skew against the loader. The same packages are repeated
+  in **devDependencies** (pinned to the host's bundled versions, currently
+  `0.2.1-rc.5`) so `tsc` and smoke tests resolve real types.
 - `dsh.bundle.patch` → `./cordis.patch.yml`; `dsh.client.inject` lists exactly
   the client services used; `dsh.client.platform: "web"`.
 - `private: true` until an npm release is intended; then drop it and add
@@ -84,7 +88,8 @@ AGENTS.md             this file
   file at `~/.dsh/dsh-<name>.json`, `mkdir` mode `0700`, `writeFile` mode
   `0600`; lazy cached `load()`, `save()`, `patch()` (string replaces /
   reset clears / undefined keeps), and `view()` that masks secrets
-  (`abcd****wxyz`). Never log or return an unmasked secret.
+  (`abcd****wxyz`). Do not log or return an unmasked secret — it would land
+  in transcripts and session logs.
 - **Tools**: `defineTool` from `@deepseek-ai/dsh-tools`; names are
   `<plugin>_<verb>` (registry in §8). Object output schemas must set
   `additionalProperties` explicitly — the type system enforces this, do not
@@ -148,13 +153,18 @@ server into the workflow.
 | route prefix | `/api/dsh-memos` | `/api/dsh-gonic` | — | — |
 | config file | `~/.dsh/dsh-memos.json` | `~/.dsh/dsh-gonic.json` | localStorage | pi credentials seam |
 
-## 9. Sanctioned exceptions
+## 9. Current exceptions and open questions
 
-- **dsh-pi-models** stays pure-JS by design (no build step, no lockfile
-  philosophy). Apply only §3 engines, §6 CI shape, and §7 docs to it.
+- **dsh-pi-models** is pure-JS today. The README and CI history frame this as
+  a design philosophy (no build step, no lockfile); that rationale has been
+  challenged and does not hold up (dev tooling never ships in the tarball,
+  the reload mechanism is language-agnostic, and the no-lockfile stance
+  produced three CI-fix commits). Conversion to the §2 stack is a standing
+  option — decide on current cost/benefit, not on the historical framing.
 - **dsh-web-skin** is client-only (no tools/routes/store); its palettes are
-  data modules and may stay `.mjs`, and `tools/*.mjs` are dev scripts.
-- Shared helper package: **deliberately none for now** — the credential store
-  and HTTP helpers are copied per plugin from the dsh-memos template. Revisit
-  (as e.g. `dsh-plugin-kit`) when a fifth plugin appears or the copied
-  surface grows.
+  data modules and stay `.mjs`, and `tools/*.mjs` are dev scripts — converting
+  data files to TS would add a build hop with no type surface to check.
+- Shared helper package: none so far — the credential store and HTTP helpers
+  are copied per plugin from the dsh-memos template. The copy overhead is
+  small and a package would add versioning/release coupling; revisit (as e.g.
+  `dsh-plugin-kit`) when a fifth plugin appears or the copied surface grows.
