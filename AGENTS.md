@@ -123,14 +123,27 @@ AGENTS.md             this file
   dsh-memos/src/client.ts and `.dsg-*` in dsh-gonic/src/client.ts). Do not
   hardcode grays — they break the stock dark theme even with no skin
   installed.
-- Settings forms share one layout kit (mirror it under plugin-scoped class
-  names): `form` (column, gap 10, max-width 420) → `form-title` → `note`
-  (status/help line, `state-warn-label` when attention is needed) →
-  `field` blocks (`label` + control) → action row (one
-  `button[data-primary="1"]`, rest secondary) → `ok`/`err` feedback line.
-  Reference: `.dsg-*` in dsh-gonic, `.dsm-*` in dsh-memos.
+- Settings forms share one layout **and copy** kit. Layout: `form` (column,
+  gap 10, max-width 420) → `form-title` → `note` → `field` blocks
+  (`label` + control) → action row → `ok`/`err` feedback line. Copy rules:
+  - `form-title` is the **plugin name** (`t("settings")`), not a sentence —
+    no parentheticals, no "（自托管 · 只读）" style suffixes.
+  - `note` is a **static** line about where credentials live (path + mode
+    0600 + who shares it). Do not put dynamic state there.
+  - Labels are short nouns ("服务器地址", "访问令牌"); hints belong in the
+    input's placeholder, not the label.
+  - The form is **prefilled from the saved config**; secrets are shown
+    masked in the placeholder with a "leave blank to keep" hint, never
+    unmasked and never in a status line.
+  - Exactly **one primary button** (`button[data-primary="1"]`), which does
+    save → test → ok/err in one action ("保存并测试"); its label switches to
+    `t("loading")` while busy. Other actions are plain secondary buttons.
+  - All user-facing strings go through `ctx.locale` (`t()`), with `en` and
+    `zh` dicts registered in `apply()`; `locale/*.json` carry `meta.title` /
+    `meta.description` for the plugin list.
+  Reference implementations: `.dsg-*` in dsh-gonic, `.dsm-*` in dsh-memos.
 - Settings UI registers `settings.section` with an order from the §8
-  registry; user-facing strings go through `locale/*.json` (`t(key)`).
+  registry.
 - Client build caveat registry (learned the hard way):
   - TS 7 injects `"use strict"` into script emit → pin TS 5.9.x.
   - Write `as` casts so no parens survive emit:
