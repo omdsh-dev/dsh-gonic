@@ -123,6 +123,12 @@ AGENTS.md             this file
   dsh-memos/src/client.ts and `.dsg-*` in dsh-gonic/src/client.ts). Do not
   hardcode grays — they break the stock dark theme even with no skin
   installed.
+- Settings forms share one layout kit (mirror it under plugin-scoped class
+  names): `form` (column, gap 10, max-width 420) → `form-title` → `note`
+  (status/help line, `state-warn-label` when attention is needed) →
+  `field` blocks (`label` + control) → action row (one
+  `button[data-primary="1"]`, rest secondary) → `ok`/`err` feedback line.
+  Reference: `.dsg-*` in dsh-gonic, `.dsm-*` in dsh-memos.
 - Settings UI registers `settings.section` with an order from the §8
   registry; user-facing strings go through `locale/*.json` (`t(key)`).
 - Client build caveat registry (learned the hard way):
