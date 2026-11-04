@@ -10,6 +10,7 @@ Play your [Gonic](https://github.com/sentriz/gonic)/Subsonic music library insid
 - **Agent tools (host half)** — `gonic_status`, `gonic_search`, `gonic_browse`, `gonic_starred`, `gonic_playlists`, `gonic_playlist`, the one write operation `gonic_create_playlist`, and `gonic_play`: a Host→browser command channel that starts playback (`playlistId` for a whole playlist / `trackIds` for specific tracks / `query` to play the first N search hits, `limit` to tune N). The tool writes the tracks into an in-memory Host slot; the browser polls `/api/dsh-gonic/play-command` every 3 s, executes only commands published after the page loaded (baseline), and claims each command via localStorage so multiple tabs never play doubled. Requires the GUI open in a browser tab that has seen a click (autoplay policy); pause/skip/volume stay on the player UI.
 - **Settings panel** — Settings → Gonic Player (section order 302) holds the connection form (server URL, username, password) with save + connection test; the same form gates the player page until the server is configured.
 - Credentials persist on the Host at `~/.dsh/dsh-gonic.json` (mode 0600), shared by the tools and the player; the browser holds them in memory only. The queue and playback position stay in the browser's `localStorage` (no secrets there).
+- The `/api/dsh-gonic/*` routes answer loopback same-origin requests only (127.0.0.1/::1 peers, `sec-fetch-site: cross-site` rejected, `origin` must match the loopback host; responses carry `referrer-policy: no-referrer`) — the config route hands the browser the Subsonic credentials, so neither a LAN peer nor a cross-site web page can read them or push play commands.
 - System-prompt announcement (`plugin:dsh-gonic`, order 152) so agents know when to reach for this plugin.
 
 ## Compatibility
@@ -50,7 +51,7 @@ Restart `dsh web`. Source is TypeScript (`src/`); `lib/` is `tsc` output — pur
 - `npm run build` — compile `src/` to `lib/`; `npm run typecheck` — strict check without emit; `npm run dev` — watch mode.
 - `src/index.ts` — host half: config store, Subsonic client, agent tools, `/api/dsh-gonic/*` routes (including the play-command slot), system-prompt announcement.
 - `src/client.ts` — the whole player: MD5 auth, Subsonic micro-client, queue store, Audio singleton, main page / dock / settings UI, play-command poller. A ModuleLoader classic script (plain React `createElement`, no JSX); the emitted `lib/client.js` must stay free of `import`/`export` statements and starts with `window.__ModuleLoader__.load(`.
-- `scripts/smoke.mjs` — read-only smoke test: `node scripts/smoke.mjs`, covering URL normalization, argument validation, error translation and (when `~/.dsh/dsh-gonic.json` is configured) live read-only queries. Never triggers writes or real playback.
+- `scripts/smoke.mjs` — read-only smoke test: `node scripts/smoke.mjs`, covering URL normalization, argument validation, the loopback route fence, error translation and (when `~/.dsh/dsh-gonic.json` is configured) live read-only queries. Never triggers writes or real playback.
 - `locale/*.json` — plugin meta strings (en / zh); `icon.svg` — panel tile.
 
 ## License

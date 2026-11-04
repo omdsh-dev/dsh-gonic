@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+	GONIC_API,
 	GonicStore,
 	PlayCommandStore,
 	browse,
@@ -24,6 +25,8 @@ import {
 	gonicSearchTool,
 	gonicStarredTool,
 	gonicStatusTool,
+	isLoopbackRequest,
+	makeRoutes,
 	normalizeBaseUrl
 } from "../lib/index.js";
 
@@ -78,7 +81,43 @@ check("play rejects multiple sources", playTwo.ok === false && /只能提供一�
 const playUnconfigured = await gonicPlayTool(tempStore(), new PlayCommandStore()).execute({ query: "x" });
 check("play unconfigured", playUnconfigured.ok === false && /尚未配置/.test(playUnconfigured.message), playUnconfigured.message);
 
-// 5. Live read-only checks against the real config, when present.
+// 5. Route fence: the /api/dsh-gonic routes hand out the Subsonic credentials
+// and trigger playback, so they must answer loopback same-origin requests
+// only. Unit checks on the predicate, then route-level behavior with mock
+// req/res — no network, no real config file touched.
+const asReq = (remoteAddress, headers = {}) => ({ method: "GET", socket: { remoteAddress }, headers: { host: "127.0.0.1:8080", ...headers } });
+check("fence allows 127.0.0.1", isLoopbackRequest(asReq("127.0.0.1")) === true);
+check("fence allows ::1", isLoopbackRequest(asReq("::1")) === true);
+check("fence allows ::ffff:127.0.0.1", isLoopbackRequest(asReq("::ffff:127.0.0.1")) === true);
+check("fence rejects LAN peer", isLoopbackRequest(asReq("192.168.168.3", { host: "192.168.168.3:8080" })) === false);
+check("fence rejects foreign host header", isLoopbackRequest(asReq("127.0.0.1", { host: "evil.example" })) === false);
+check("fence rejects cross-site fetch", isLoopbackRequest(asReq("127.0.0.1", { "sec-fetch-site": "cross-site" })) === false);
+check("fence allows same-origin fetch", isLoopbackRequest(asReq("127.0.0.1", { "sec-fetch-site": "same-origin", origin: "http://127.0.0.1:8080" })) === true);
+check("fence rejects foreign origin", isLoopbackRequest(asReq("127.0.0.1", { origin: "http://evil.example" })) === false);
+const mockRes = () => ({
+	status: 0,
+	headers: {},
+	body: "",
+	writeHead(status, headers) { this.status = status; this.headers = headers ?? {}; },
+	end(body) { this.body = typeof body === "string" ? body : ""; }
+});
+const fenceRoutes = makeRoutes(tempStore(), new PlayCommandStore());
+const configRoute = fenceRoutes.find((route) => route.path === GONIC_API.config);
+const commandRoute = fenceRoutes.find((route) => route.path === GONIC_API.playCommand);
+const deniedRes = mockRes();
+await configRoute.handler(asReq("192.168.168.3", { host: "192.168.168.3:8080" }), deniedRes);
+check("config route fences LAN peer", deniedRes.status === 403 && JSON.parse(deniedRes.body).error === "forbidden: loopback-only", String(deniedRes.status));
+const okRes = mockRes();
+await configRoute.handler(asReq("127.0.0.1"), okRes);
+check("config route serves loopback", okRes.status === 200 && okRes.headers["referrer-policy"] === "no-referrer", String(okRes.status));
+const commandDenied = mockRes();
+await commandRoute.handler(asReq("192.168.168.3", { host: "192.168.168.3:8080" }), commandDenied);
+check("play-command fences LAN peer", commandDenied.status === 403, String(commandDenied.status));
+const commandRes = mockRes();
+await commandRoute.handler(asReq("127.0.0.1"), commandRes);
+check("play-command serves loopback", commandRes.status === 200 && typeof JSON.parse(commandRes.body).ts === "number", String(commandRes.status));
+
+// 6. Live read-only checks against the real config, when present.
 const realStore = new GonicStore();
 const realCfg = await realStore.get();
 if (realCfg.baseUrl && realCfg.username && realCfg.password) {

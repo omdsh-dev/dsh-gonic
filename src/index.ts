@@ -3,8 +3,9 @@
  *
  * Owns the server credentials (~/.dsh/dsh-gonic.json, mode 0600), mounts the
  * agent tools (gonic_status / gonic_search / gonic_browse / gonic_starred /
- * gonic_playlists / gonic_playlist / gonic_create_playlist), serves the
- * /api/dsh-gonic routes the settings panel talks to, and announces the
+ * gonic_playlists / gonic_playlist / gonic_create_playlist / gonic_play),
+ * serves the /api/dsh-gonic routes the Client half talks to (loopback-only —
+ * the config route hands out the Subsonic credentials), and announces the
  * capability to the agent through a system-prompt section.
  *
  * The Gonic server itself is never modified: this plugin is a plain Subsonic
@@ -717,14 +718,49 @@ function gonicPlayTool(store: GonicStore, playStore: PlayCommandStore) {
 //#endregion
 
 //#region http routes for the settings panel
+/**
+ * Loopback-only fence plus browser same-origin markers (mirrors dsh-memos).
+ * The config route hands the browser the Subsonic credentials and the
+ * play-command route triggers playback, so every route in this family must
+ * answer only requests from this machine that a cross-site web page could
+ * not have produced.
+ */
+function isLoopbackRequest(request: IncomingMessage): boolean {
+	const address = request.socket.remoteAddress;
+	if (address !== "127.0.0.1" && address !== "::1" && address !== "::ffff:127.0.0.1") return false;
+	const host = request.headers.host;
+	if (typeof host !== "string") return false;
+	let hostUrl;
+	try {
+		hostUrl = new URL(`http://${host}`);
+	} catch {
+		return false;
+	}
+	if (hostUrl.hostname !== "127.0.0.1" && hostUrl.hostname !== "localhost" && hostUrl.hostname !== "[::1]") return false;
+	if (request.headers["sec-fetch-site"] === "cross-site") return false;
+	const origin = request.headers.origin;
+	if (origin === void 0) return true;
+	try {
+		return new URL(origin).host === hostUrl.host;
+	} catch {
+		return false;
+	}
+}
 function writeJson(res: ServerResponse, status: number, value: unknown): void {
 	const payload = JSON.stringify(value);
 	res.writeHead(status, {
 		"content-type": "application/json; charset=utf-8",
 		"content-length": Buffer.byteLength(payload),
-		"cache-control": "no-store"
+		"cache-control": "no-store",
+		"referrer-policy": "no-referrer"
 	});
 	res.end(payload);
+}
+/** Answer 403 and return false unless the request passes the loopback fence. */
+function fence(req: IncomingMessage, res: ServerResponse): boolean {
+	if (isLoopbackRequest(req)) return true;
+	writeJson(res, 403, { error: "forbidden: loopback-only" });
+	return false;
 }
 function readJsonBody(req: IncomingMessage): Promise<any> {
 	return new Promise((resolve, reject) => {
@@ -754,6 +790,7 @@ function makeRoutes(store: GonicStore, playStore?: PlayCommandStore): WebRoute[]
 			kind: "exact",
 			path: GONIC_API.config,
 			handler: async (req, res) => {
+				if (!fence(req, res)) return;
 				try {
 					if (req.method === "GET") {
 						await store.get();
@@ -777,6 +814,7 @@ function makeRoutes(store: GonicStore, playStore?: PlayCommandStore): WebRoute[]
 			kind: "exact",
 			path: GONIC_API.test,
 			handler: async (req, res) => {
+				if (!fence(req, res)) return;
 				if (req.method !== "POST") {
 					res.writeHead(405, { allow: "POST" });
 					res.end();
@@ -802,6 +840,7 @@ function makeRoutes(store: GonicStore, playStore?: PlayCommandStore): WebRoute[]
 			kind: "exact",
 			path: GONIC_API.playCommand,
 			handler: async (req, res) => {
+				if (!fence(req, res)) return;
 				if (req.method !== "GET") {
 					res.writeHead(405, { allow: "GET" });
 					res.end();
@@ -893,6 +932,7 @@ export {
 	gonicStarredTool,
 	gonicStatusTool,
 	inject,
+	isLoopbackRequest,
 	makeRoutes,
 	name,
 	normalizeBaseUrl,
