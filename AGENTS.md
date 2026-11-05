@@ -197,12 +197,17 @@ Two channels, both fed by the same version bump:
   `npm pack` output → `dist/pkg.tgz` → creates or refreshes the `v<version>`
   release. Installs with
   `dsh plugin --profile web add ".../releases/latest/download/pkg.tgz"`.
-- **npm** (`publish.yml`): fires when that release is published (or manually).
-  Uses OIDC trusted publishing (`permissions: id-token: write`) with
+- **npm** (`publish.yml`): effectively manual — the GitHub Release is created
+  with `GITHUB_TOKEN`, which never cascades a `release: published` event to
+  other workflows (GitHub anti-recursion), so the declared trigger is inert.
+  Dispatch it from Actions → publish → Run workflow, or publish from a clean
+  local checkout with `npm publish --access public`. The workflow uses OIDC
+  trusted publishing (`permissions: id-token: write`) with
   `npm publish --provenance --access public` — no `NPM_TOKEN` secret is
   stored, so the npmjs.com side must configure a trusted publisher for this
-  repository + `publish.yml`. An already-published version is skipped, so
-  re-runs are safe.
+  repository + `publish.yml` (until then the job fails with E404 and a local
+  publish is the path). An already-published version is skipped, so re-runs
+  are safe.
 
 Rules:
 
@@ -212,5 +217,7 @@ Rules:
   that anyone could otherwise register.
 - `publishConfig: { "access": "public" }` and `repository` are declared on
   every package for provenance linking and explicit intent.
-- Releasing = bump `version` in `package.json`, push to `main`. Never publish
-  a version from a dirty tree, and never reuse a version (npm is immutable).
+- Releasing = bump `version` in `package.json`, push to `main` (the GitHub
+  Release + tarball follow automatically; npm then needs the manual dispatch
+  or local publish above). Never publish a version from a dirty tree, and
+  never reuse a version (npm is immutable).
